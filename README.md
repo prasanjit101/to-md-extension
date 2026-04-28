@@ -1,12 +1,11 @@
 # Webtext Chrome Extension
 
-This Chrome extension allows users to select any DOM element on a webpage and scrape its text content, images, and video links into a Markdown file into an LLM friendly format. The downloaded file is named after the title of the current tab.
+This Chrome extension allows users to select any DOM element on a webpage and scrape its text content, images, and video links into a Markdown file into an LLM friendly format. The md content is immediately copied into the clipboard.
 
 ## Features
 - **Select DOM Elements**: Click on any element to select it.
 - **Visual Feedback**: Hover over elements to see a red outline; click to confirm selection.
-- **Markdown Export**: Scrape text, images, and video links into a Markdown file.
-- **Tab Title as Filename**: The downloaded file is named after the current tab's title.
+- **Markdown Export**: Scrape text, images, and video links into a Markdown file and copy into the clipboard for the user to be able to paste it easily anywhere.
 - **Custom Alerts**: Notifies users when the extension cannot run on restricted pages (e.g., `chrome://` or `edge://`).
 
 ---
@@ -31,24 +30,6 @@ This Chrome extension allows users to select any DOM element on a webpage and sc
 
 ---
 
-## Usage
-
-### Step 1: Activate the Extension
-1. Navigate to any webpage where you want to scrape content.
-2. Click the **DOM Scraper to Markdown** extension icon in the toolbar.
-
-### Step 2: Select a DOM Element
-1. Hover over elements on the page to see a red outline.
-2. Click on the element you want to scrape.
-
-### Step 3: Download the Markdown File
-1. After clicking, the extension will:
-   - Scrape the text, images, and video links from the selected element.
-   - Generate a Markdown file named after the current tab's title.
-   - Automatically download the file to your default downloads folder.
-
----
-
 ## Example
 
 ### Input: Webpage Content
@@ -68,34 +49,6 @@ This is a **sample** paragraph with a [link](https://example.com).
 
 ![Sample Image](image.png)
 ```
-
----
-
-## Troubleshooting
-
-### 1. Extension Doesn't Work on Certain Pages
-- The extension cannot run on restricted pages like `chrome://` or `edge://`.
-- A custom alert will notify you if the extension is unable to run on the current page.
-
-### 2. Invalid Filename Error
-- If the tab title contains invalid characters, the extension will sanitize the filename automatically.
-- Example: `My Document: A Study?` → `My_Document__A_Study_.md`
-
-### 3. No Content Scraped
-- Ensure you are selecting an element that contains visible content (e.g., text, images, or videos).
-- Avoid selecting empty or non-content elements (e.g., `<div>` with no text).
-
----
-
-## Customization
-
-### Modify the Code
-- Open the `content.js` file to customize:
-  - **Markdown Formatting**: Update the `scrapeToMarkdown` function.
-  - **Ignored Elements**: Modify the `shouldIgnoreElement` function to exclude specific tags, classes, or attributes.
-
-### Add New Features
-- Extend the functionality by adding support for additional HTML elements (e.g., tables, iframes).
 
 ---
 

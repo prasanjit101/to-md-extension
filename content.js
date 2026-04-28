@@ -1,207 +1,922 @@
 // Check if the current page is restricted
-if (window.location.href.startsWith('chrome://') || window.location.href.startsWith('edge://')) {
-  alert('Extension cannot run on chrome:// or edge:// pages.');
+if (
+  window.location.href.startsWith("chrome://") ||
+  window.location.href.startsWith("edge://")
+) {
+  alert("Extension cannot run on chrome:// or edge:// pages.");
 } else {
   let hoveredElement = null;
-  let isExtensionActive = true; // Track if the extension is active
+  let isExtensionActive = true;
 
-  function scrapeToMarkdown(element) {
-    // Helper function to check if an element should be ignored
-    function shouldIgnoreElement(node) {
-      const ignoredTags = ['script', 'style', 'svg'];
-      const ignoredClasses = ['ad', 'ads', 'advertisement']; // Add more as needed
-      const ignoredAttributes = ['onclick', 'onload']; // Add more as needed
-
-      // Ignore specific tags
-      if (ignoredTags.includes(node.tagName.toLowerCase())) {
-        return true;
-      }
-
-      // Ignore elements with specific classes
-      if (node.classList && Array.from(node.classList).some(cls => ignoredClasses.includes(cls))) {
-        return true;
-      }
-
-      // Ignore elements with specific attributes
-      if (ignoredAttributes.some(attr => node.hasAttribute(attr))) {
-        return true;
-      }
-
-      return false;
+  /**
+   * Convert a relative URL to an absolute URL
+   */
+  function toAbsoluteUrl(url) {
+    if (!url) return "";
+    try {
+      return new URL(url, window.location.href).href;
+    } catch (e) {
+      return url;
     }
-
-    // Helper function to convert HTML elements to Markdown
-    function convertToMarkdown(node) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        return node.textContent.trim();
-      }
-
-      if (node.nodeType !== Node.ELEMENT_NODE || shouldIgnoreElement(node)) {
-        return '';
-      }
-
-      const tagName = node.tagName.toLowerCase();
-      const children = Array.from(node.childNodes).map(convertToMarkdown).join('');
-
-      switch (tagName) {
-        case 'h1':
-          return `# ${children}\n\n`;
-        case 'h2':
-          return `## ${children}\n\n`;
-        case 'h3':
-          return `### ${children}\n\n`;
-        case 'h4':
-          return `#### ${children}\n\n`;
-        case 'h5':
-          return `##### ${children}\n\n`;
-        case 'h6':
-          return `###### ${children}\n\n`;
-        case 'p':
-          return `${children}\n\n`;
-        case 'b':
-        case 'strong':
-          return `**${children}**`;
-        case 'i':
-        case 'em':
-          return `*${children}*`;
-        case 'a':
-          return `[${children}](${node.href})`;
-        case 'img':
-          return `![${node.alt || 'image'}](${node.src})`;
-        case 'ul':
-          return `${children}`;
-        case 'ol':
-          return `${children}`;
-        case 'li':
-          const prefix = node.parentElement.tagName.toLowerCase() === 'ol' ? '1. ' : '- ';
-          return `${prefix}${children}\n`;
-        case 'blockquote':
-          return `> ${children}\n\n`;
-        case 'code':
-          return `\`${children}\``;
-        case 'pre':
-          return `\`\`\`\n${children}\n\`\`\`\n\n`;
-        case 'hr':
-          return `---\n\n`;
-        default:
-          return children;
-      }
-    }
-
-    // Convert the entire element to Markdown
-    return convertToMarkdown(element).trim();
   }
-  // Helper function to sanitize filenames
+
+  /**
+   * Check if an element is visible (not hidden via CSS)
+   */
+  function isElementVisible(element) {
+    if (!element || element.nodeType !== Node.ELEMENT_NODE) return true;
+
+    const style = window.getComputedStyle(element);
+
+    // Check for common hiding methods
+    if (style.display === "none") return false;
+    if (style.visibility === "hidden") return false;
+    if (style.opacity === "0") return false;
+
+    // Check for zero dimensions (but allow inline elements)
+    const rect = element.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0 && style.overflow === "hidden")
+      return false;
+
+    // Check for hidden attribute
+    if (element.hidden) return false;
+
+    // Check aria-hidden
+    if (element.getAttribute("aria-hidden") === "true") return false;
+
+    return true;
+  }
+
+  /**
+   * Check if an element should be ignored during conversion
+   */
+  function shouldIgnoreElement(node) {
+    if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+
+    const tagName = node.tagName.toLowerCase();
+
+    // Ignored tags that don't contribute meaningful content
+    const ignoredTags = [
+      "script",
+      "style",
+      "noscript",
+      "template",
+      "svg",
+      "canvas",
+      "head",
+      "meta",
+      "link",
+      "input",
+      "button",
+      "select",
+      "textarea",
+      "form",
+    ];
+
+    if (ignoredTags.includes(tagName)) return true;
+
+    // Ignore common ad/utility classes. Match whole tokens, not substrings —
+    // otherwise classes like "header", "shadow", "padding", "loading" all get
+    // dropped because they contain the substring "ad".
+    const ignoredClassTokens = new Set([
+      "ad",
+      "ads",
+      "advert",
+      "adverts",
+      "advertisement",
+      "advertising",
+      "banner",
+      "popup",
+      "modal",
+      "overlay",
+      "cookie",
+      "cookies",
+      "newsletter",
+      "subscribe",
+      "social-share",
+      "share-buttons",
+    ]);
+
+    if (node.classList && node.classList.length > 0) {
+      for (const cls of node.classList) {
+        const lower = cls.toLowerCase();
+        if (ignoredClassTokens.has(lower)) return true;
+        // Split compound class names (e.g. "ad-banner", "cookie_notice") into
+        // tokens and check each token. A class only counts as "ignored" if it
+        // is the ignore token alone or paired with other ignore tokens.
+        const tokens = lower.split(/[-_]+/).filter(Boolean);
+        if (
+          tokens.length > 1 &&
+          tokens.every((t) => ignoredClassTokens.has(t))
+        ) {
+          return true;
+        }
+      }
+    }
+
+    // Check visibility
+    if (!isElementVisible(node)) return true;
+
+    return false;
+  }
+
+  /**
+   * Get the best image source from img, picture, or source elements
+   */
+  function getBestImageSrc(imgElement) {
+    // Check for srcset and get the largest image
+    if (imgElement.srcset) {
+      const srcsetParts = imgElement.srcset.split(",").map((s) => s.trim());
+      let bestSrc = null;
+      let bestWidth = 0;
+
+      for (const part of srcsetParts) {
+        const [url, descriptor] = part.split(/\s+/);
+        const width = descriptor ? parseInt(descriptor) : 0;
+        if (width > bestWidth || !bestSrc) {
+          bestWidth = width;
+          bestSrc = url;
+        }
+      }
+
+      if (bestSrc) return toAbsoluteUrl(bestSrc);
+    }
+
+    // Check parent picture element for source
+    const picture = imgElement.closest("picture");
+    if (picture) {
+      const sources = picture.querySelectorAll("source");
+      for (const source of sources) {
+        if (source.srcset) {
+          const srcsetParts = source.srcset.split(",")[0].split(/\s+/)[0];
+          return toAbsoluteUrl(srcsetParts);
+        }
+      }
+    }
+
+    // Fallback to src or data-src (lazy loading)
+    return toAbsoluteUrl(
+      imgElement.src ||
+        imgElement.dataset.src ||
+        imgElement.dataset.lazySrc ||
+        imgElement.getAttribute("data-original") ||
+        "",
+    );
+  }
+
+  /**
+   * Get video source URL
+   */
+  function getVideoSrc(videoElement) {
+    if (videoElement.src) {
+      return toAbsoluteUrl(videoElement.src);
+    }
+
+    const source = videoElement.querySelector("source");
+    if (source && source.src) {
+      return toAbsoluteUrl(source.src);
+    }
+
+    return toAbsoluteUrl(
+      videoElement.dataset.src || videoElement.dataset.videoSrc || "",
+    );
+  }
+
+  /**
+   * Get audio source URL
+   */
+  function getAudioSrc(audioElement) {
+    if (audioElement.src) {
+      return toAbsoluteUrl(audioElement.src);
+    }
+
+    const source = audioElement.querySelector("source");
+    if (source && source.src) {
+      return toAbsoluteUrl(source.src);
+    }
+
+    return "";
+  }
+
+  /**
+   * Extract embed URL from iframe (YouTube, Vimeo, etc.)
+   */
+  function getIframeInfo(iframeElement) {
+    const src = iframeElement.src || iframeElement.dataset.src || "";
+    if (!src) return null;
+
+    const absoluteSrc = toAbsoluteUrl(src);
+    const title = iframeElement.title || "Embedded content";
+
+    let type = "embed";
+    if (
+      absoluteSrc.includes("youtube.com") ||
+      absoluteSrc.includes("youtu.be")
+    ) {
+      type = "YouTube video";
+    } else if (absoluteSrc.includes("vimeo.com")) {
+      type = "Vimeo video";
+    } else if (
+      absoluteSrc.includes("twitter.com") ||
+      absoluteSrc.includes("x.com")
+    ) {
+      type = "Twitter embed";
+    } else if (absoluteSrc.includes("spotify.com")) {
+      type = "Spotify embed";
+    }
+
+    return { src: absoluteSrc, title, type };
+  }
+
+  /**
+   * Calculate list depth for proper indentation
+   */
+  function getListDepth(element) {
+    let depth = 0;
+    let parent = element.parentElement;
+
+    while (parent) {
+      const tagName = parent.tagName.toLowerCase();
+      if (tagName === "ul" || tagName === "ol") {
+        depth++;
+      }
+      parent = parent.parentElement;
+    }
+
+    return depth;
+  }
+
+  /**
+   * Get the list item index for ordered lists
+   */
+  function getListItemIndex(liElement) {
+    const parent = liElement.parentElement;
+    if (!parent || parent.tagName.toLowerCase() !== "ol") return null;
+
+    let index = 1;
+    const start = parseInt(parent.getAttribute("start")) || 1;
+
+    let sibling = liElement.previousElementSibling;
+    while (sibling) {
+      if (sibling.tagName.toLowerCase() === "li") {
+        index++;
+      }
+      sibling = sibling.previousElementSibling;
+    }
+
+    return start + index - 1;
+  }
+
+  /**
+   * Convert table to markdown
+   */
+  function convertTableToMarkdown(tableElement) {
+    const rows = [];
+    const thead = tableElement.querySelector("thead");
+    const tbody = tableElement.querySelector("tbody") || tableElement;
+
+    let headerRow = null;
+    if (thead) {
+      const headerCells = thead.querySelectorAll("th, td");
+      if (headerCells.length > 0) {
+        headerRow = Array.from(headerCells).map((cell) =>
+          convertToMarkdown(cell, { inline: true })
+            .trim()
+            .replace(/\|/g, "\\|"),
+        );
+      }
+    }
+
+    const bodyRows = tbody.querySelectorAll("tr");
+    for (const row of bodyRows) {
+      if (row.closest("thead")) continue;
+
+      const cells = row.querySelectorAll("th, td");
+      if (cells.length > 0) {
+        const rowData = Array.from(cells).map((cell) =>
+          convertToMarkdown(cell, { inline: true })
+            .trim()
+            .replace(/\|/g, "\\|"),
+        );
+
+        if (!headerRow && row.querySelector("th")) {
+          headerRow = rowData;
+        } else {
+          rows.push(rowData);
+        }
+      }
+    }
+
+    if (rows.length === 0 && !headerRow) return "";
+
+    let markdown = "";
+    const columnCount = Math.max(
+      headerRow ? headerRow.length : 0,
+      ...rows.map((r) => r.length),
+    );
+
+    if (headerRow) {
+      markdown += "| " + headerRow.join(" | ") + " |\n";
+      markdown += "| " + Array(columnCount).fill("---").join(" | ") + " |\n";
+    } else if (rows.length > 0) {
+      const firstRow = rows.shift();
+      markdown += "| " + firstRow.join(" | ") + " |\n";
+      markdown += "| " + Array(columnCount).fill("---").join(" | ") + " |\n";
+    }
+
+    for (const row of rows) {
+      while (row.length < columnCount) {
+        row.push("");
+      }
+      markdown += "| " + row.join(" | ") + " |\n";
+    }
+
+    return markdown + "\n";
+  }
+
+  /**
+   * Normalize whitespace in text
+   */
+  function normalizeWhitespace(text) {
+    return text
+      .replace(/[\t\n\r]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  /**
+   * Get markdown for all children of an element
+   */
+  function getChildrenMarkdown(element, options) {
+    options = options || {};
+    let result = "";
+
+    for (const child of element.childNodes) {
+      result += convertToMarkdown(child, options);
+    }
+
+    if (options.inline) {
+      return normalizeWhitespace(result);
+    }
+
+    return result;
+  }
+
+  /**
+   * Main conversion function
+   */
+  function convertToMarkdown(node, options) {
+    options = options || {};
+    const inline = options.inline || false;
+
+    // Handle text nodes
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node.textContent;
+      if (inline) {
+        return normalizeWhitespace(text);
+      }
+      return text.replace(/[\t\n\r]+/g, " ").replace(/\s+/g, " ");
+    }
+
+    // Skip non-element nodes
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return "";
+    }
+
+    // Check if element should be ignored
+    if (shouldIgnoreElement(node)) {
+      return "";
+    }
+
+    const tagName = node.tagName.toLowerCase();
+
+    // Headings
+    if (tagName === "h1") {
+      return "# " + getChildrenMarkdown(node, { inline: true }) + "\n\n";
+    }
+    if (tagName === "h2") {
+      return "## " + getChildrenMarkdown(node, { inline: true }) + "\n\n";
+    }
+    if (tagName === "h3") {
+      return "### " + getChildrenMarkdown(node, { inline: true }) + "\n\n";
+    }
+    if (tagName === "h4") {
+      return "#### " + getChildrenMarkdown(node, { inline: true }) + "\n\n";
+    }
+    if (tagName === "h5") {
+      return "##### " + getChildrenMarkdown(node, { inline: true }) + "\n\n";
+    }
+    if (tagName === "h6") {
+      return "###### " + getChildrenMarkdown(node, { inline: true }) + "\n\n";
+    }
+
+    // Paragraphs
+    if (tagName === "p") {
+      const pContent = getChildrenMarkdown(node, { inline: true });
+      return pContent ? pContent + "\n\n" : "";
+    }
+
+    // Divs and sections
+    if (
+      tagName === "div" ||
+      tagName === "section" ||
+      tagName === "article" ||
+      tagName === "main"
+    ) {
+      const divContent = getChildrenMarkdown(node);
+      return divContent ? divContent + "\n" : "";
+    }
+
+    // Bold
+    if (tagName === "b" || tagName === "strong") {
+      const boldContent = getChildrenMarkdown(node, { inline: true });
+      return boldContent ? "**" + boldContent + "**" : "";
+    }
+
+    // Italic
+    if (tagName === "i" || tagName === "em") {
+      const italicContent = getChildrenMarkdown(node, { inline: true });
+      return italicContent ? "*" + italicContent + "*" : "";
+    }
+
+    // Underline
+    if (tagName === "u") {
+      const underlineContent = getChildrenMarkdown(node, { inline: true });
+      return underlineContent ? "<u>" + underlineContent + "</u>" : "";
+    }
+
+    // Strikethrough
+    if (tagName === "s" || tagName === "strike" || tagName === "del") {
+      const strikeContent = getChildrenMarkdown(node, { inline: true });
+      return strikeContent ? "~~" + strikeContent + "~~" : "";
+    }
+
+    // Mark/highlight
+    if (tagName === "mark") {
+      const markContent = getChildrenMarkdown(node, { inline: true });
+      return markContent ? "==" + markContent + "==" : "";
+    }
+
+    // Superscript
+    if (tagName === "sup") {
+      const supContent = getChildrenMarkdown(node, { inline: true });
+      return supContent ? "<sup>" + supContent + "</sup>" : "";
+    }
+
+    // Subscript
+    if (tagName === "sub") {
+      const subContent = getChildrenMarkdown(node, { inline: true });
+      return subContent ? "<sub>" + subContent + "</sub>" : "";
+    }
+
+    // Links
+    if (tagName === "a") {
+      const linkText = getChildrenMarkdown(node, { inline: true });
+      const href = toAbsoluteUrl(node.href);
+      if (!linkText && !href) return "";
+      if (!href) return linkText;
+      return "[" + (linkText || href) + "](" + href + ")";
+    }
+
+    // Images
+    if (tagName === "img") {
+      const imgSrc = getBestImageSrc(node);
+      if (!imgSrc) return "";
+      const alt = node.alt || node.title || "image";
+      return "![" + alt + "](" + imgSrc + ")";
+    }
+
+    // Picture element
+    if (tagName === "picture") {
+      const img = node.querySelector("img");
+      if (img) return convertToMarkdown(img, options);
+      return "";
+    }
+
+    // Figure: image+caption when present, otherwise render children (covers
+    // <figure> wrappers around <pre> code blocks emitted by rehype-pretty-code,
+    // MDX, Astro Starlight, etc.).
+    if (tagName === "figure") {
+      const figImg = node.querySelector("img, picture");
+      const figCaption = node.querySelector("figcaption");
+
+      if (figImg) {
+        const figContent = [convertToMarkdown(figImg, options)];
+        if (figCaption) {
+          const captionText = getChildrenMarkdown(figCaption, { inline: true });
+          if (captionText) figContent.push("*" + captionText + "*");
+        }
+        return figContent.join("\n") + "\n\n";
+      }
+
+      const figChildren = getChildrenMarkdown(node);
+      return figChildren ? figChildren + "\n" : "";
+    }
+
+    // Video
+    if (tagName === "video") {
+      const videoSrc = getVideoSrc(node);
+      if (!videoSrc) return "";
+      const videoTitle =
+        node.title || node.getAttribute("aria-label") || "Video";
+      return "[" + videoTitle + "](" + videoSrc + ")\n\n";
+    }
+
+    // Audio
+    if (tagName === "audio") {
+      const audioSrc = getAudioSrc(node);
+      if (!audioSrc) return "";
+      const audioTitle =
+        node.title || node.getAttribute("aria-label") || "Audio";
+      return "[" + audioTitle + "](" + audioSrc + ")\n\n";
+    }
+
+    // Iframe embeds
+    if (tagName === "iframe") {
+      const iframeInfo = getIframeInfo(node);
+      if (!iframeInfo) return "";
+      return (
+        "[" +
+        iframeInfo.type +
+        ": " +
+        iframeInfo.title +
+        "](" +
+        iframeInfo.src +
+        ")\n\n"
+      );
+    }
+
+    // Lists
+    if (tagName === "ul" || tagName === "ol") {
+      const listContent = getChildrenMarkdown(node, {
+        listDepth: getListDepth(node),
+      });
+      return listContent ? listContent + "\n" : "";
+    }
+
+    // List items
+    if (tagName === "li") {
+      const depth = getListDepth(node.parentElement);
+      const indent = "  ".repeat(Math.max(0, depth - 1));
+      const parent = node.parentElement;
+      const isOrdered = parent && parent.tagName.toLowerCase() === "ol";
+
+      let prefix;
+      if (isOrdered) {
+        const index = getListItemIndex(node);
+        prefix = index + ". ";
+      } else {
+        prefix = "- ";
+      }
+
+      let liContent = "";
+      let nestedList = "";
+
+      for (const child of node.childNodes) {
+        if (child.nodeType === Node.ELEMENT_NODE) {
+          const childTag = child.tagName.toLowerCase();
+          if (childTag === "ul" || childTag === "ol") {
+            nestedList += convertToMarkdown(child, { listDepth: depth });
+          } else {
+            liContent += convertToMarkdown(child, { inline: true });
+          }
+        } else {
+          liContent += convertToMarkdown(child, { inline: true });
+        }
+      }
+
+      liContent = normalizeWhitespace(liContent);
+      let result = indent + prefix + liContent + "\n";
+      if (nestedList) {
+        result += nestedList;
+      }
+
+      return result;
+    }
+
+    // Definition lists
+    if (tagName === "dl") {
+      return getChildrenMarkdown(node) + "\n";
+    }
+
+    if (tagName === "dt") {
+      const dtContent = getChildrenMarkdown(node, { inline: true });
+      return dtContent ? "**" + dtContent + "**\n" : "";
+    }
+
+    if (tagName === "dd") {
+      const ddContent = getChildrenMarkdown(node, { inline: true });
+      return ddContent ? ": " + ddContent + "\n\n" : "";
+    }
+
+    // Blockquote
+    if (tagName === "blockquote") {
+      const quoteContent = getChildrenMarkdown(node);
+      if (!quoteContent) return "";
+      const quotedLines = quoteContent
+        .trim()
+        .split("\n")
+        .map(function (line) {
+          return "> " + line;
+        })
+        .join("\n");
+      return quotedLines + "\n\n";
+    }
+
+    // Inline code
+    if (tagName === "code") {
+      const codeContent = node.textContent;
+      // If a <code> inside a <pre> is reached directly (e.g. user clicked the
+      // <code>), render the enclosing <pre> as a fenced code block instead of
+      // returning raw text. The <pre> handler extracts via textContent so this
+      // won't recurse back through here.
+      const preParent = node.closest("pre");
+      if (preParent) {
+        return convertToMarkdown(preParent, options);
+      }
+      const backtickMatch = codeContent.match(/`+/g);
+      const backtickCount = backtickMatch
+        ? backtickMatch.reduce(function (max, match) {
+            return Math.max(max, match.length);
+          }, 0)
+        : 0;
+      const backticks = "`".repeat(backtickCount + 1);
+      const padding = backtickCount > 0 ? " " : "";
+      return backticks + padding + codeContent + padding + backticks;
+    }
+
+    // Code blocks
+    if (tagName === "pre") {
+      const preCode = node.querySelector("code");
+      // innerText respects visual line breaks (e.g. Shiki / rehype-pretty-code
+      // wrap each line in <span class="line"> with no newline characters);
+      // textContent would return the whole block on one line. Fall back to
+      // textContent if innerText is unavailable.
+      const source = preCode || node;
+      const preContent =
+        typeof source.innerText === "string" && source.innerText.length > 0
+          ? source.innerText
+          : source.textContent;
+
+      let language = "";
+      const codeElement = preCode || node;
+      const classList = Array.from(codeElement.classList);
+      for (let i = 0; i < classList.length; i++) {
+        const cls = classList[i];
+        if (cls.startsWith("language-") || cls.startsWith("lang-")) {
+          language = cls.replace(/^(language-|lang-)/, "");
+          break;
+        }
+        if (
+          cls.match(
+            /^(javascript|python|java|ruby|go|rust|typescript|html|css|json|xml|bash|shell|sql)$/i,
+          )
+        ) {
+          language = cls.toLowerCase();
+          break;
+        }
+      }
+
+      return "```" + language + "\n" + preContent + "\n```\n\n";
+    }
+
+    // Keyboard input
+    if (tagName === "kbd") {
+      const kbdContent = node.textContent;
+      return "<kbd>" + kbdContent + "</kbd>";
+    }
+
+    // Tables
+    if (tagName === "table") {
+      return convertTableToMarkdown(node);
+    }
+
+    // Skip table internal elements
+    if (
+      tagName === "thead" ||
+      tagName === "tbody" ||
+      tagName === "tfoot" ||
+      tagName === "tr" ||
+      tagName === "th" ||
+      tagName === "td"
+    ) {
+      if (inline) {
+        return getChildrenMarkdown(node, { inline: true });
+      }
+      return "";
+    }
+
+    // Horizontal rule
+    if (tagName === "hr") {
+      return "---\n\n";
+    }
+
+    // Line break
+    if (tagName === "br") {
+      return inline ? " " : "\n";
+    }
+
+    // Abbreviations
+    if (tagName === "abbr") {
+      const abbrContent = getChildrenMarkdown(node, { inline: true });
+      const title = node.title;
+      if (title) {
+        return abbrContent + " (" + title + ")";
+      }
+      return abbrContent;
+    }
+
+    // Time
+    if (tagName === "time") {
+      const timeContent = getChildrenMarkdown(node, { inline: true });
+      const datetime = node.getAttribute("datetime");
+      if (datetime && datetime !== timeContent) {
+        return timeContent + " (" + datetime + ")";
+      }
+      return timeContent;
+    }
+
+    // Details/Summary (collapsible)
+    if (tagName === "details") {
+      const summary = node.querySelector("summary");
+      const summaryText = summary
+        ? getChildrenMarkdown(summary, { inline: true })
+        : "Details";
+
+      let detailsContent = "";
+      for (const child of node.childNodes) {
+        if (
+          child.nodeType === Node.ELEMENT_NODE &&
+          child.tagName.toLowerCase() === "summary"
+        ) {
+          continue;
+        }
+        detailsContent += convertToMarkdown(child, options);
+      }
+
+      return (
+        "<details>\n<summary>" +
+        summaryText +
+        "</summary>\n\n" +
+        detailsContent.trim() +
+        "\n</details>\n\n"
+      );
+    }
+
+    // Summary (handled by details)
+    if (tagName === "summary") {
+      return "";
+    }
+
+    // Span and other inline elements
+    if (tagName === "span" || tagName === "label") {
+      return getChildrenMarkdown(node, { inline: true });
+    }
+
+    // Default: just get children content
+    return getChildrenMarkdown(node, options);
+  }
+
+  /**
+   * Clean up the final markdown output
+   */
+  function cleanupMarkdown(markdown) {
+    return markdown
+      .replace(/\n{3,}/g, "\n\n")
+      .split("\n")
+      .map(function (line) {
+        return line.trimEnd();
+      })
+      .join("\n")
+      .trim();
+  }
+
+  /**
+   * Main function to scrape element to markdown
+   */
+  function scrapeToMarkdown(element) {
+    const markdown = convertToMarkdown(element);
+    return cleanupMarkdown(markdown);
+  }
+
+  /**
+   * Helper function to sanitize filenames
+   */
   function sanitizeFilename(title) {
-    // Replace invalid characters with underscores
     return title
-      .replace(/[/\\:*?"<>|]/g, '_') // Replace invalid characters
-      .trim() // Remove leading/trailing spaces
-      .replace(/\s+/g, '_') // Replace spaces with underscores
-      .substring(0, 100); // Limit filename length
+      .replace(/[/\\:*?"<>|]/g, "_")
+      .trim()
+      .replace(/\s+/g, "_")
+      .substring(0, 100);
   }
 
   function handleElementClick(event) {
-    if (!isExtensionActive) return; // Do nothing if the extension is inactive
+    if (!isExtensionActive) return;
 
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
 
-    const element = event.target.closest('*');
+    const element = event.target.closest("*");
 
-    // Remove hover outline
     if (hoveredElement) {
-      hoveredElement.style.outline = '';
+      hoveredElement.style.outline = "";
     }
 
-    // Visual feedback for click
-    element.style.outline = '2px solid red';
-    setTimeout(() => element.style.outline = '', 500);
+    element.style.outline = "2px solid red";
+    setTimeout(function () {
+      element.style.outline = "";
+    }, 500);
 
-    // Generate Markdown
     const markdown = scrapeToMarkdown(element);
 
-    // Cleanup event listeners
     deactivateExtension();
 
-    // Create a Blob and generate a URL
-    const blob = new Blob([markdown], { type: 'text/markdown' });
-    const url = URL.createObjectURL(blob);
+    chrome.runtime.sendMessage({ action: "getTabTitle" }, function (response) {
+      const tabTitle = response.tabTitle || "content";
+      const sanitizedTitle = sanitizeFilename(tabTitle);
 
-    // Get the tab title
-    chrome.runtime.sendMessage({ action: 'getTabTitle' }, (response) => {
-      const tabTitle = response.tabTitle || 'content'; // Fallback to 'content' if title is unavailable
-    const sanitizedTitle = sanitizeFilename(tabTitle); // Sanitize the title
-    const filename = `${sanitizedTitle}.md`; // Add .md extension
+      navigator.clipboard
+        .writeText(markdown)
+        .then(function () {
+          const notification = document.createElement("div");
+          notification.textContent = "Markdown copied to clipboard!";
+          notification.style.cssText =
+            "position: fixed;" +
+            "bottom: 20px;" +
+            "right: 20px;" +
+            "background: black;" +
+            "color: white;" +
+            "padding: 16px 24px;" +
+            "border-radius: 8px;" +
+            'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;' +
+            "font-size: 14px;" +
+            "box-shadow: 0 4px 12px rgba(0,0,0,0.3);" +
+            "z-index: 999999;" +
+            "transition: opacity 0.3s, transform 0.3s;" +
+            "opacity: 1;" +
+            "transform: translateX(0);";
 
-    // Send the URL and filename to the background script
-      // chrome.runtime.sendMessage({
-      //   action: 'downloadMarkdown',
-      //   url: url,
-      //   filename: filename
-      // });
+          document.body.appendChild(notification);
 
-      navigator.clipboard.writeText(markdown).then(() => {
-        alert('Content copied to clipboard');
-      }).catch((err) => {
-        console.error('Failed to copy content: ', err);
+          setTimeout(function () {
+            notification.style.opacity = "0";
+            notification.style.transform = "translateX(100%)";
+            setTimeout(function () {
+              notification.remove();
+            }, 300);
+          }, 2000);
+        })
+        .catch(function (err) {
+          console.error("Failed to copy content: ", err);
+          alert("Failed to copy content to clipboard");
+        });
     });
-  });
   }
 
   function handleElementHover(event) {
-    if (!isExtensionActive) return; // Do nothing if the extension is inactive
+    if (!isExtensionActive) return;
 
-    const element = event.target.closest('*');
+    const element = event.target.closest("*");
     if (element && element !== hoveredElement) {
-      // Remove outline from previously hovered element
       if (hoveredElement) {
-        hoveredElement.style.outline = '';
+        hoveredElement.style.outline = "";
       }
-      // Add outline to the currently hovered element
-      element.style.outline = '2px solid red';
+      element.style.outline = "2px solid red";
       hoveredElement = element;
     }
   }
 
   function handleElementHoverOut(event) {
-    if (!isExtensionActive) return; // Do nothing if the extension is inactive
+    if (!isExtensionActive) return;
 
-    const element = event.target.closest('*');
+    const element = event.target.closest("*");
     if (element === hoveredElement) {
-      // Remove outline when mouse leaves the element
-      element.style.outline = '';
+      element.style.outline = "";
       hoveredElement = null;
     }
   }
 
   function deactivateExtension() {
-    // Remove all event listeners
-    document.removeEventListener('click', handleElementClick, true);
-    document.removeEventListener('mouseover', handleElementHover);
-    document.removeEventListener('mouseout', handleElementHoverOut);
+    document.removeEventListener("click", handleElementClick, true);
+    document.removeEventListener("mouseover", handleElementHover);
+    document.removeEventListener("mouseout", handleElementHoverOut);
 
-    // Reset hovered element
     if (hoveredElement) {
-      hoveredElement.style.outline = '';
+      hoveredElement.style.outline = "";
       hoveredElement = null;
     }
 
-    // Set extension as inactive
     isExtensionActive = false;
   }
 
   function activateExtension() {
-    // Reattach event listeners
-    document.addEventListener('click', handleElementClick, true);
-    document.addEventListener('mouseover', handleElementHover);
-    document.addEventListener('mouseout', handleElementHoverOut);
+    document.addEventListener("click", handleElementClick, true);
+    document.addEventListener("mouseover", handleElementHover);
+    document.addEventListener("mouseout", handleElementHoverOut);
 
-    // Set extension as active
     isExtensionActive = true;
   }
 
-  // Initialize the extension
   activateExtension();
 }
