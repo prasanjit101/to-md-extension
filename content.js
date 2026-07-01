@@ -8,6 +8,21 @@ if (
   let hoveredElement = null;
   let isExtensionActive = true;
 
+  // Multi-select state. selectedElements preserves click order; each entry
+  // stores the element's prior inline outline so it can be restored on cleanup.
+  const selectedElements = [];
+  let badgeElement = null;
+
+  const HOVER_OUTLINE = "2px solid red";
+  const SELECTED_OUTLINE = "2px solid #2563ff";
+
+  // background.js re-injects this script on every toolbar click. Tear down any
+  // still-active session from a previous injection so we don't run two sets of
+  // listeners with orphaned outlines/state at once.
+  if (typeof window.__webtextCleanup === "function") {
+    window.__webtextCleanup();
+  }
+
   /**
    * Convert a relative URL to an absolute URL
    */
@@ -810,6 +825,84 @@ if (
       .substring(0, 100);
   }
 
+  /**
+   * Return the index of an element in the selection, or -1 if not selected.
+   */
+  function isSelected(el) {
+    for (let i = 0; i < selectedElements.length; i++) {
+      if (selectedElements[i].el === el) return i;
+    }
+    return -1;
+  }
+
+  /**
+   * Add an element to the selection and apply the persistent selected outline.
+   */
+  function addSelection(el) {
+    selectedElements.push({ el: el });
+    el.style.outline = SELECTED_OUTLINE;
+  }
+
+  /**
+   * Remove an element from the selection by index and clear its outline.
+   * Outlines are always cleared to "" (matching the single-select behavior)
+   * rather than restored, since the hover handler overwrites any prior inline
+   * outline before an element can be selected.
+   */
+  function removeSelectionAt(index) {
+    selectedElements[index].el.style.outline = "";
+    selectedElements.splice(index, 1);
+  }
+
+  /**
+   * Briefly thicken a selected element's outline to acknowledge a click that
+   * was a no-op because that element (an ancestor) is already selected.
+   */
+  function flashSelected(el) {
+    el.style.outline = "4px solid #2563ff";
+    setTimeout(function () {
+      // Only revert if the element is still selected (not removed meanwhile).
+      if (isSelected(el) !== -1) {
+        el.style.outline = SELECTED_OUTLINE;
+      }
+    }, 300);
+  }
+
+  /**
+   * Toggle an element into/out of the selection, applying nested de-dup rules:
+   * - if it's already selected -> remove it (toggle off)
+   * - if it's contained by an already-selected element -> ignore
+   * - if it contains already-selected elements -> remove those, then add it
+   * - otherwise -> add it
+   */
+  function toggleSelection(el) {
+    const existing = isSelected(el);
+    if (existing !== -1) {
+      removeSelectionAt(existing);
+      updateBadge();
+      return;
+    }
+
+    // If an ancestor is already selected the content is already captured, so
+    // don't add el; flash the ancestor so the click still gives feedback.
+    for (const entry of selectedElements) {
+      if (entry.el !== el && entry.el.contains(el)) {
+        flashSelected(entry.el);
+        return;
+      }
+    }
+
+    // Remove any already-selected descendants; this element supersedes them.
+    for (let i = selectedElements.length - 1; i >= 0; i--) {
+      if (el.contains(selectedElements[i].el)) {
+        removeSelectionAt(i);
+      }
+    }
+
+    addSelection(el);
+    updateBadge();
+  }
+
   function handleElementClick(event) {
     if (!isExtensionActive) return;
 
@@ -818,19 +911,80 @@ if (
     event.stopImmediatePropagation();
 
     const element = event.target.closest("*");
+    if (!element) return;
 
-    if (hoveredElement) {
-      hoveredElement.style.outline = "";
+    // Toggling changes the outline directly; drop hover bookkeeping so the
+    // hover-out handler doesn't later clear a selected element's outline.
+    if (hoveredElement === element) {
+      hoveredElement = null;
     }
 
-    element.style.outline = "2px solid red";
-    setTimeout(function () {
-      element.style.outline = "";
-    }, 500);
+    toggleSelection(element);
+  }
 
-    const markdown = scrapeToMarkdown(element);
+  /**
+   * Create/update the floating counter badge. Removes it when nothing selected.
+   */
+  function updateBadge() {
+    const count = selectedElements.length;
+
+    if (count === 0) {
+      removeBadge();
+      return;
+    }
+
+    if (!badgeElement) {
+      badgeElement = document.createElement("div");
+      badgeElement.style.cssText =
+        "position: fixed;" +
+        "bottom: 20px;" +
+        "right: 20px;" +
+        "background: black;" +
+        "color: white;" +
+        "padding: 16px 24px;" +
+        "border-radius: 8px;" +
+        'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;' +
+        "font-size: 14px;" +
+        "box-shadow: 0 4px 12px rgba(0,0,0,0.3);" +
+        "z-index: 999999;";
+      document.body.appendChild(badgeElement);
+    }
+
+    badgeElement.textContent =
+      count + " selected · Enter to copy · Esc to cancel";
+  }
+
+  function removeBadge() {
+    if (badgeElement) {
+      badgeElement.remove();
+      badgeElement = null;
+    }
+  }
+
+  /**
+   * Scrape all selected elements in click order, copy the joined markdown.
+   */
+  function finishSelection() {
+    // Remove the badge before scraping so its text can never be captured into
+    // the output (e.g. when a selected element contains document.body).
+    removeBadge();
+
+    const parts = selectedElements
+      .map(function (entry) {
+        try {
+          return scrapeToMarkdown(entry.el);
+        } catch (err) {
+          console.error("Failed to scrape element: ", err);
+          return "";
+        }
+      })
+      .filter(Boolean);
 
     deactivateExtension();
+
+    if (parts.length === 0) return;
+
+    const markdown = parts.join("\n\n---\n\n");
 
     chrome.runtime.sendMessage({ action: "getTabTitle" }, function (response) {
       const tabTitle = response.tabTitle || "content";
@@ -874,15 +1028,49 @@ if (
     });
   }
 
+  /**
+   * True if the event target is a field the user might be typing into, so the
+   * extension shouldn't steal its Enter/Escape keystrokes.
+   */
+  function isEditableTarget(target) {
+    if (!target || target.nodeType !== Node.ELEMENT_NODE) return false;
+    const tag = target.tagName.toLowerCase();
+    if (tag === "input" || tag === "textarea" || tag === "select") return true;
+    if (target.isContentEditable) return true;
+    return false;
+  }
+
+  function handleKeyDown(event) {
+    if (!isExtensionActive) return;
+
+    // Let focused inputs/editors keep their own Enter/Escape behavior.
+    if (isEditableTarget(event.target)) return;
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      finishSelection();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      deactivateExtension();
+    }
+  }
+
   function handleElementHover(event) {
     if (!isExtensionActive) return;
 
     const element = event.target.closest("*");
     if (element && element !== hoveredElement) {
-      if (hoveredElement) {
+      // Restore the previous hovered element's outline, but never touch an
+      // element that is part of the selection.
+      if (hoveredElement && isSelected(hoveredElement) === -1) {
         hoveredElement.style.outline = "";
       }
-      element.style.outline = "2px solid red";
+      // Leave selected elements showing their persistent selected outline.
+      if (isSelected(element) === -1) {
+        element.style.outline = HOVER_OUTLINE;
+      }
       hoveredElement = element;
     }
   }
@@ -892,7 +1080,9 @@ if (
 
     const element = event.target.closest("*");
     if (element === hoveredElement) {
-      element.style.outline = "";
+      if (isSelected(element) === -1) {
+        element.style.outline = "";
+      }
       hoveredElement = null;
     }
   }
@@ -901,19 +1091,37 @@ if (
     document.removeEventListener("click", handleElementClick, true);
     document.removeEventListener("mouseover", handleElementHover);
     document.removeEventListener("mouseout", handleElementHoverOut);
+    document.removeEventListener("keydown", handleKeyDown, true);
+
+    // Restore outlines for every selected element and clear the selection.
+    for (let i = selectedElements.length - 1; i >= 0; i--) {
+      removeSelectionAt(i);
+    }
 
     if (hoveredElement) {
       hoveredElement.style.outline = "";
       hoveredElement = null;
     }
 
+    removeBadge();
+
     isExtensionActive = false;
+
+    // Clear the cross-injection cleanup handle only if it still points at this
+    // session (a newer injection may have already replaced it).
+    if (window.__webtextCleanup === deactivateExtension) {
+      window.__webtextCleanup = null;
+    }
   }
 
   function activateExtension() {
     document.addEventListener("click", handleElementClick, true);
     document.addEventListener("mouseover", handleElementHover);
     document.addEventListener("mouseout", handleElementHoverOut);
+    document.addEventListener("keydown", handleKeyDown, true);
+
+    // Expose this session's teardown so a later re-injection can end it first.
+    window.__webtextCleanup = deactivateExtension;
 
     isExtensionActive = true;
   }
