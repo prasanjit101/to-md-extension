@@ -1,33 +1,32 @@
-// Chrome refuses to inject content scripts into restricted pages, so the
-// background service worker already blocks those clicks. This guard is a
-// defensive no-op that also keeps the rest of the file inside a single block
-// without re-indenting ~1100 lines.
-const RESTRICTED_PROTOCOLS = [
-  "chrome:",
-  "chrome-untrusted:",
-  "chrome-extension:",
-  "edge:",
-  "about:",
-  "devtools:",
-  "view-source:",
-  "file:"
-];
-
-function isRestrictedPage() {
-  return RESTRICTED_PROTOCOLS.indexOf(window.location.protocol) !== -1;
-}
-
-if (!isRestrictedPage()) {
+// Chrome never injects content scripts into restricted pages (the service worker
+// blocks those clicks), so this is a defensive one-liner that also keeps the rest
+// of the file inside a single block.
+if (!/^(chrome|chrome-untrusted|chrome-extension|edge|about|devtools|view-source|file):$/.test(location.protocol)) {
   let hoveredElement = null;
   let isExtensionActive = true;
 
-  // Multi-select state. selectedElements preserves click order; each entry
-  // stores the element's prior inline outline so it can be restored on cleanup.
+  // Multi-select state, in click order.
   const selectedElements = [];
   let badgeElement = null;
 
   const HOVER_OUTLINE = "2px solid red";
   const SELECTED_OUTLINE = "2px solid #2563ff";
+
+  // Heading tag -> Markdown level.
+  const HEADING_LEVEL = { h1: 1, h2: 2, h3: 3, h4: 4, h5: 5, h6: 6 };
+
+  // Shared look for the selection badge and the copy toast.
+  const TOAST_STYLE =
+    "position: fixed;" +
+    "bottom: 20px;" +
+    "right: 20px;" +
+    "padding: 16px 24px;" +
+    "border-radius: 8px;" +
+    'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;' +
+    "font-size: 14px;" +
+    "color: white;" +
+    "box-shadow: 0 4px 12px rgba(0,0,0,0.3);" +
+    "z-index: 999999;";
 
   // background.js re-injects this script on every toolbar click. Tear down any
   // still-active session from a previous injection so we don't run two sets of
@@ -400,10 +399,12 @@ if (!isRestrictedPage()) {
     // Handle text nodes
     if (node.nodeType === Node.TEXT_NODE) {
       const text = node.textContent;
-      if (inline) {
-        return normalizeWhitespace(text);
-      }
-      return text.replace(/[\t\n\r]+/g, " ").replace(/\s+/g, " ");
+      // Block context: a whitespace-only node is just indentation between
+      // elements and would otherwise prefix the next line (" ## Title").
+      if (!text.trim()) return inline ? " " : "";
+      // Inline context keeps its boundary spaces, otherwise words run together
+      // across inline elements ("Plain**bold**and"). The parent trims the edges.
+      return text.replace(/\s+/g, " ");
     }
 
     // Skip non-element nodes
@@ -419,23 +420,14 @@ if (!isRestrictedPage()) {
     const tagName = node.tagName.toLowerCase();
 
     // Headings
-    if (tagName === "h1") {
-      return "# " + getChildrenMarkdown(node, { inline: true }) + "\n\n";
-    }
-    if (tagName === "h2") {
-      return "## " + getChildrenMarkdown(node, { inline: true }) + "\n\n";
-    }
-    if (tagName === "h3") {
-      return "### " + getChildrenMarkdown(node, { inline: true }) + "\n\n";
-    }
-    if (tagName === "h4") {
-      return "#### " + getChildrenMarkdown(node, { inline: true }) + "\n\n";
-    }
-    if (tagName === "h5") {
-      return "##### " + getChildrenMarkdown(node, { inline: true }) + "\n\n";
-    }
-    if (tagName === "h6") {
-      return "###### " + getChildrenMarkdown(node, { inline: true }) + "\n\n";
+    const headingLevel = HEADING_LEVEL[tagName];
+    if (headingLevel) {
+      return (
+        "#".repeat(headingLevel) +
+        " " +
+        getChildrenMarkdown(node, { inline: true }) +
+        "\n\n"
+      );
     }
 
     // Paragraphs
@@ -511,7 +503,9 @@ if (!isRestrictedPage()) {
       const imgSrc = getBestImageSrc(node);
       if (!imgSrc) return "";
       const alt = node.alt || node.title || "image";
-      return "![" + alt + "](" + imgSrc + ")";
+      // A block-level image needs its own line; inline images must not break
+      // the surrounding sentence.
+      return "![" + alt + "](" + imgSrc + ")" + (inline ? "" : "\n\n");
     }
 
     // Picture element
@@ -576,15 +570,15 @@ if (!isRestrictedPage()) {
 
     // Lists
     if (tagName === "ul" || tagName === "ol") {
-      const listContent = getChildrenMarkdown(node, {
-        listDepth: getListDepth(node),
-      });
+      const listContent = getChildrenMarkdown(node);
       return listContent ? listContent + "\n" : "";
     }
 
     // List items
     if (tagName === "li") {
-      const depth = getListDepth(node.parentElement);
+      // getListDepth counts the ul/ol ancestors of the passed element, so pass
+      // the li itself to get 1 for a top-level item.
+      const depth = getListDepth(node);
       const indent = "  ".repeat(Math.max(0, depth - 1));
       const parent = node.parentElement;
       const isOrdered = parent && parent.tagName.toLowerCase() === "ol";
@@ -604,7 +598,7 @@ if (!isRestrictedPage()) {
         if (child.nodeType === Node.ELEMENT_NODE) {
           const childTag = child.tagName.toLowerCase();
           if (childTag === "ul" || childTag === "ol") {
-            nestedList += convertToMarkdown(child, { listDepth: depth });
+            nestedList += convertToMarkdown(child);
           } else {
             liContent += convertToMarkdown(child, { inline: true });
           }
@@ -810,12 +804,8 @@ if (!isRestrictedPage()) {
    */
   function cleanupMarkdown(markdown) {
     return markdown
+      .replace(/[ \t\r]+$/gm, "")
       .replace(/\n{3,}/g, "\n\n")
-      .split("\n")
-      .map(function (line) {
-        return line.trimEnd();
-      })
-      .join("\n")
       .trim();
   }
 
@@ -834,19 +824,10 @@ if (!isRestrictedPage()) {
     const notification = document.createElement("div");
     notification.textContent = message;
     notification.style.cssText =
-      "position: fixed;" +
-      "bottom: 20px;" +
-      "right: 20px;" +
+      TOAST_STYLE +
       "background: " +
       (isError ? "#d93025" : "black") +
       ";" +
-      "color: white;" +
-      "padding: 16px 24px;" +
-      "border-radius: 8px;" +
-      'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;' +
-      "font-size: 14px;" +
-      "box-shadow: 0 4px 12px rgba(0,0,0,0.3);" +
-      "z-index: 999999;" +
       "transition: opacity 0.3s, transform 0.3s;" +
       "opacity: 1;" +
       "transform: translateX(0);";
@@ -866,17 +847,14 @@ if (!isRestrictedPage()) {
    * Return the index of an element in the selection, or -1 if not selected.
    */
   function isSelected(el) {
-    for (let i = 0; i < selectedElements.length; i++) {
-      if (selectedElements[i].el === el) return i;
-    }
-    return -1;
+    return selectedElements.indexOf(el);
   }
 
   /**
    * Add an element to the selection and apply the persistent selected outline.
    */
   function addSelection(el) {
-    selectedElements.push({ el: el });
+    selectedElements.push(el);
     el.style.outline = SELECTED_OUTLINE;
   }
 
@@ -887,7 +865,7 @@ if (!isRestrictedPage()) {
    * outline before an element can be selected.
    */
   function removeSelectionAt(index) {
-    selectedElements[index].el.style.outline = "";
+    selectedElements[index].style.outline = "";
     selectedElements.splice(index, 1);
   }
 
@@ -922,16 +900,16 @@ if (!isRestrictedPage()) {
 
     // If an ancestor is already selected the content is already captured, so
     // don't add el; flash the ancestor so the click still gives feedback.
-    for (const entry of selectedElements) {
-      if (entry.el !== el && entry.el.contains(el)) {
-        flashSelected(entry.el);
+    for (const selected of selectedElements) {
+      if (selected !== el && selected.contains(el)) {
+        flashSelected(selected);
         return;
       }
     }
 
     // Remove any already-selected descendants; this element supersedes them.
     for (let i = selectedElements.length - 1; i >= 0; i--) {
-      if (el.contains(selectedElements[i].el)) {
+      if (el.contains(selectedElements[i])) {
         removeSelectionAt(i);
       }
     }
@@ -972,18 +950,7 @@ if (!isRestrictedPage()) {
 
     if (!badgeElement) {
       badgeElement = document.createElement("div");
-      badgeElement.style.cssText =
-        "position: fixed;" +
-        "bottom: 20px;" +
-        "right: 20px;" +
-        "background: black;" +
-        "color: white;" +
-        "padding: 16px 24px;" +
-        "border-radius: 8px;" +
-        'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;' +
-        "font-size: 14px;" +
-        "box-shadow: 0 4px 12px rgba(0,0,0,0.3);" +
-        "z-index: 999999;";
+      badgeElement.style.cssText = TOAST_STYLE + "background: black;";
       document.body.appendChild(badgeElement);
     }
 
@@ -1007,9 +974,9 @@ if (!isRestrictedPage()) {
     removeBadge();
 
     const parts = selectedElements
-      .map(function (entry) {
+      .map(function (el) {
         try {
-          return scrapeToMarkdown(entry.el);
+          return scrapeToMarkdown(el);
         } catch (err) {
           console.error("Failed to scrape element: ", err);
           return "";
