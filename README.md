@@ -52,6 +52,12 @@ This is a **sample** paragraph with a [link](https://example.com).
 
 ---
 
+## Privacy
+
+Webtext reads page content only on your device, on the tab you click, and sends nothing anywhere. See [PRIVACY.md](PRIVACY.md).
+
+---
+
 ## License
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 

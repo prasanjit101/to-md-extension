@@ -1,10 +1,23 @@
-// Check if the current page is restricted
-if (
-  window.location.href.startsWith("chrome://") ||
-  window.location.href.startsWith("edge://")
-) {
-  alert("Extension cannot run on chrome:// or edge:// pages.");
-} else {
+// Chrome refuses to inject content scripts into restricted pages, so the
+// background service worker already blocks those clicks. This guard is a
+// defensive no-op that also keeps the rest of the file inside a single block
+// without re-indenting ~1100 lines.
+const RESTRICTED_PROTOCOLS = [
+  "chrome:",
+  "chrome-untrusted:",
+  "chrome-extension:",
+  "edge:",
+  "about:",
+  "devtools:",
+  "view-source:",
+  "file:"
+];
+
+function isRestrictedPage() {
+  return RESTRICTED_PROTOCOLS.indexOf(window.location.protocol) !== -1;
+}
+
+if (!isRestrictedPage()) {
   let hoveredElement = null;
   let isExtensionActive = true;
 
@@ -815,14 +828,38 @@ if (
   }
 
   /**
-   * Helper function to sanitize filenames
+   * Show a short, non-blocking toast in the corner of the page.
    */
-  function sanitizeFilename(title) {
-    return title
-      .replace(/[/\\:*?"<>|]/g, "_")
-      .trim()
-      .replace(/\s+/g, "_")
-      .substring(0, 100);
+  function showToast(message, isError) {
+    const notification = document.createElement("div");
+    notification.textContent = message;
+    notification.style.cssText =
+      "position: fixed;" +
+      "bottom: 20px;" +
+      "right: 20px;" +
+      "background: " +
+      (isError ? "#d93025" : "black") +
+      ";" +
+      "color: white;" +
+      "padding: 16px 24px;" +
+      "border-radius: 8px;" +
+      'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;' +
+      "font-size: 14px;" +
+      "box-shadow: 0 4px 12px rgba(0,0,0,0.3);" +
+      "z-index: 999999;" +
+      "transition: opacity 0.3s, transform 0.3s;" +
+      "opacity: 1;" +
+      "transform: translateX(0);";
+
+    document.body.appendChild(notification);
+
+    setTimeout(function () {
+      notification.style.opacity = "0";
+      notification.style.transform = "translateX(100%)";
+      setTimeout(function () {
+        notification.remove();
+      }, 300);
+    }, 2000);
   }
 
   /**
@@ -986,46 +1023,15 @@ if (
 
     const markdown = parts.join("\n\n---\n\n");
 
-    chrome.runtime.sendMessage({ action: "getTabTitle" }, function (response) {
-      const tabTitle = response.tabTitle || "content";
-      const sanitizedTitle = sanitizeFilename(tabTitle);
-
-      navigator.clipboard
-        .writeText(markdown)
-        .then(function () {
-          const notification = document.createElement("div");
-          notification.textContent = "Markdown copied to clipboard!";
-          notification.style.cssText =
-            "position: fixed;" +
-            "bottom: 20px;" +
-            "right: 20px;" +
-            "background: black;" +
-            "color: white;" +
-            "padding: 16px 24px;" +
-            "border-radius: 8px;" +
-            'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;' +
-            "font-size: 14px;" +
-            "box-shadow: 0 4px 12px rgba(0,0,0,0.3);" +
-            "z-index: 999999;" +
-            "transition: opacity 0.3s, transform 0.3s;" +
-            "opacity: 1;" +
-            "transform: translateX(0);";
-
-          document.body.appendChild(notification);
-
-          setTimeout(function () {
-            notification.style.opacity = "0";
-            notification.style.transform = "translateX(100%)";
-            setTimeout(function () {
-              notification.remove();
-            }, 300);
-          }, 2000);
-        })
-        .catch(function (err) {
-          console.error("Failed to copy content: ", err);
-          alert("Failed to copy content to clipboard");
-        });
-    });
+    navigator.clipboard.writeText(markdown).then(
+      function () {
+        showToast("Markdown copied to clipboard!");
+      },
+      function (err) {
+        console.error("Failed to copy content: ", err);
+        showToast("Failed to copy to clipboard", true);
+      }
+    );
   }
 
   /**
